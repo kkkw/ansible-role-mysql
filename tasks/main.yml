@@ -1,0 +1,110 @@
+---
+- block:
+  - name: create group
+    group: name=mysql system=yes
+
+  - name: crate user
+    user: name=mysql group=wheel groups=mysql system=yes
+
+  - name: install lib
+    yum: name={{ item }}
+    with_items:
+      - cmake
+      - ncurses-devel
+
+  - name: download tar ball
+    get_url:
+      url: "http://dev.mysql.com/get/Downloads/MySQL-{{ mysql_major_version }}/mysql-{{ mysql_version }}.tar.gz"
+      dest: "{{ mysql_src_dir }}"
+    always_run: yes
+    register: mysql_downloaded_tarball
+
+  - name: unarchive tar ball
+    unarchive:
+     src: "{{ mysql_downloaded_tarball.dest }}"
+     dest: "{{ mysql_src_dir }}"
+     creates: "{{ mysql_src_dir }}/mysql-{{ mysql_version }}"
+
+  - name: install
+    command: '{{ item }}'
+    with_items:
+      - cmake . -DCMAKE_INSTALL_PREFIX={{ mysql_prefix_dir }} -DDEFAULT_CHARSET=utf8 -DDEFAULT_COLLATION=utf8_general_ci -DWITH_EXTRA_CHARSETS=all -DWITH_PIC=1
+      - make
+      - make install
+    args:
+      chdir: "{{ mysql_src_dir }}/mysql-{{ mysql_version }}"
+      creates: "{{ mysql_prefix_dir }}"
+
+  - name: change path attribute
+    file: path={{ item }} owner=mysql group=mysql mode=0775 recurse=yes
+    with_items:
+      - "{{ mysql_prefix_dir }}"
+      - "{{ mysql_data_dir }}"
+
+  - name: init mysql
+    command: "scripts/mysql_install_db --user=mysql --datadir={{ mysql_data_dir }}"
+    args:
+      creates: "{{ mysql_prefix_dir }}/my-new.cnf"
+      chdir: "{{ mysql_prefix_dir }}"
+
+  - name: link rc script
+    file:
+      src: "{{ mysql_prefix_dir }}/support-files/mysql.server"
+      dest: "/etc/init.d/mysql"
+      state: link
+
+  - name: ensure started service
+    service:
+      name: mysql
+      enabled: yes
+      state: started
+    become_user: mysql
+
+  - name: check run mysql_secure_installation
+    command: ls {{ mysql_prefix_dir }}/.mysql_secure_installation.log
+    ignore_errors: yes
+    register: run_mysql_secure_installation
+
+  - block:
+
+    - name: link /tmp/mysql.sock
+      file:
+        src: "{{ mysql_data_dir }}/mysql.sock"
+        dest: "/tmp/mysql.sock"
+        state: link
+
+    - name: create mysql_secure_installation_input
+      copy:
+        dest: "{{ mysql_prefix_dir }}/.mysql_secure_installation_input"
+        content: |+
+
+          Y
+          {{ mysql_root_password }}
+          {{ mysql_root_password }}
+          Y
+          Y
+          Y
+          Y
+
+    - name: run mysql_secure_installation
+      become_user: mysql
+      shell: |
+        cat {{ mysql_prefix_dir }}/.mysql_secure_installation_input | {{ mysql_prefix_dir }}/bin/mysql_secure_installation | tee {{ mysql_prefix_dir }}/.mysql_secure_installation.log
+        chdir={{ mysql_prefix_dir }}
+      environment:
+        PATH: "{{ ansible_env.PATH }}:{{ mysql_prefix_dir }}/bin"
+
+    - name: absent mysql_secure_installation_input
+      file:
+        path: "{{ mysql_prefix_dir }}/.mysql_secure_installation_input"
+        state: absent
+
+    - name: unlink /tmp/mysql.sock
+      file:
+        src: "{{ mysql_data_dir }}/mysql.sock"
+        dest: "/tmp/mysql.sock"
+        state: absent
+
+    when: run_mysql_secure_installation | failed
+
+  become: True
